@@ -36,7 +36,35 @@
 # Los pasos que debe seguir para la construcción de un modelo de
 # clasificación están descritos a continuación.
 #
-#
+import pandas as pd
+import gzip
+import json
+import os
+import pickle
+
+from sklearn.pipeline import Pipeline
+from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import OneHotEncoder, MinMaxScaler
+from sklearn.compose import ColumnTransformer
+from sklearn.model_selection import GridSearchCV
+from sklearn.metrics import (
+    balanced_accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    confusion_matrix,
+)
+
+
+def load_data(train_path, test_path):
+    df_train = pd.read_csv(train_path, index_col=False, compression="zip")
+    df_test = pd.read_csv(test_path, index_col=False, compression="zip")
+
+    print("Datos cargados exitosamente")
+
+    return df_train, df_test
+
 # Paso 1.
 # Realice la limpieza de los datasets:
 # - Renombre la columna "default payment next month" a "default".
@@ -47,12 +75,26 @@
 #
 # Renombre la columna "default payment next month" a "default"
 # y remueva la columna "ID".
-#
-#
+
+def preprocess_data(df, set_name):
+
+    df = df.rename(columns={"default payment next month": "default"})
+    df = df.drop(columns=["ID"])
+    df = df.dropna()
+    df["EDUCATION"] = df["EDUCATION"].apply(lambda x: x if x < 4 else 4)
+
+    return df
+
 # Paso 2.
 # Divida los datasets en x_train, y_train, x_test, y_test.
-#
-#
+
+def split_features_target(df, target_name):
+    X = df.drop(columns=[target_name])
+    y = df[target_name]
+
+
+    return X, y
+
 # Paso 3.
 # Cree un pipeline para el modelo de clasificación. Este pipeline debe
 # contener las siguientes capas:
@@ -61,19 +103,72 @@
 # - Escala las demas variables al intervalo [0, 1].
 # - Selecciona las K mejores caracteristicas.
 # - Ajusta un modelo de regresion logistica.
-#
-#
+
+def pipeline_definition(df):
+
+    categorical_features = ["EDUCATION", "MARRIAGE", "SEX"]
+    numerical_features = df.columns.difference(categorical_features).tolist()
+
+    # Crear el preprocesador
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("cat", OneHotEncoder(handle_unknown="ignore"), categorical_features),
+            ("num", MinMaxScaler(), numerical_features),
+        ],
+    )
+
+    # Crear el pipeline
+    pipeline = Pipeline(
+        steps=[
+            ("preprocessor", preprocessor),
+            ("feature_selection", SelectKBest(score_func=f_classif)),
+            ("classifier", LogisticRegression(random_state=42)),
+        ]
+    )
+
+    return pipeline
+
 # Paso 4.
 # Optimice los hiperparametros del pipeline usando validación cruzada.
 # Use 10 splits para la validación cruzada. Use la función de precision
 # balanceada para medir la precisión del modelo.
-#
-#
+
+def hyperparameter_optimization(pipeline, X_train, y_train):
+    param_grid = {
+        "feature_selection__k": range(1, 25),
+        "classifier__penalty": ["l1", "l2"],
+        "classifier__solver": ["liblinear"],
+        "classifier__C": [1e-4, 1e-3, 1e-2, 1e-1, 1, 10, 100, 1000],
+        "classifier__max_iter": [200, 300, 500],
+    }
+
+    grid_search = GridSearchCV(
+        estimator=pipeline,
+        param_grid=param_grid,
+        cv=10,
+        scoring="balanced_accuracy",
+        verbose=1,
+        n_jobs=-1,
+        refit=True,
+    )
+    grid_search.fit(X_train, y_train)
+
+
+
+    return grid_search
+
 # Paso 5.
 # Guarde el modelo (comprimido con gzip) como "files/models/model.pkl.gz".
 # Recuerde que es posible guardar el modelo comprimido usanzo la libreria gzip.
-#
-#
+
+def save_model(model, model_path):
+    # Guardar el modelo comprimido con gzip
+    os.makedirs(os.path.dirname(model_path), exist_ok=True)
+
+    with gzip.open(model_path, "wb") as f:
+        pickle.dump(model, f)
+
+
 # Paso 6.
 # Calcule las metricas de precision, precision balanceada, recall,
 # y f1-score para los conjuntos de entrenamiento y prueba.
@@ -84,8 +179,24 @@
 #
 # {'type': 'metrics', 'dataset': 'train', 'precision': 0.8, 'balanced_accuracy': 0.7, 'recall': 0.9, 'f1_score': 0.85}
 # {'type': 'metrics', 'dataset': 'test', 'precision': 0.7, 'balanced_accuracy': 0.6, 'recall': 0.8, 'f1_score': 0.75}
-#
-#
+
+def calculate_metrics(model, X, y, dataset_type):
+    y_pred = model.predict(X)
+
+    precision = precision_score(y, y_pred, zero_division=0)
+    balanced_acc = balanced_accuracy_score(y, y_pred)
+    recall = recall_score(y, y_pred, zero_division=0)
+    f1 = f1_score(y, y_pred, zero_division=0)
+
+    metrics = {
+        "type": "metrics",
+        "dataset": dataset_type,
+        "precision": precision,
+        "balanced_accuracy": balanced_acc,
+        "recall": recall,
+        "f1_score": f1,
+    }
+
 # Paso 7.
 # Calcule las matrices de confusion para los conjuntos de entrenamiento y
 # prueba. Guardelas en el archivo files/output/metrics.json. Cada fila
@@ -94,4 +205,52 @@
 #
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
-#
+    
+    cm = confusion_matrix(y, y_pred)
+    cm_dict = {
+        "type": "cm_matrix",
+        "dataset": dataset_type,
+        "true_0": {"predicted_0": int(cm[0, 0]), "predicted_1": int(cm[0, 1])},
+        "true_1": {"predicted_0": int(cm[1, 0]), "predicted_1": int(cm[1, 1])},
+    }
+
+
+    return metrics, cm_dict
+
+
+def save_metrics(metrics, metrics_path):
+    # Guardar las métricas en un archivo json
+    os.makedirs(os.path.dirname(metrics_path), exist_ok=True)
+
+    with open(metrics_path, "w") as f:
+        for metric in metrics:
+            f.write(json.dumps(metric) + "\n")
+
+    print("Métricas guardadas exitosamente")
+
+
+def main():
+    df_train, df_test = load_data(
+        "files/input/train_data.csv.zip", "files/input/test_data.csv.zip"
+    )
+
+    df_train = preprocess_data(df_train, "train")
+    df_test = preprocess_data(df_test, "test")
+
+    X_train, y_train = split_features_target(df_train, "default")
+    X_test, y_test = split_features_target(df_test, "default")
+
+    pipeline = pipeline_definition(X_train)
+    grid_search = hyperparameter_optimization(pipeline, X_train, y_train)
+
+    save_model(grid_search, "files/models/model.pkl.gz")
+
+    train_metrics, train_cm = calculate_metrics(grid_search, X_train, y_train, "train")
+    test_metrics, test_cm = calculate_metrics(grid_search, X_test, y_test, "test")
+
+    metrics = [train_metrics, test_metrics, train_cm, test_cm]
+    save_metrics(metrics, "files/output/metrics.json")
+
+
+if __name__ == "__main__":
+    main()
